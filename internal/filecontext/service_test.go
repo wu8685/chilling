@@ -73,7 +73,7 @@ func TestChangesBatchesAndDeduplicatesNativeFileChanges(t *testing.T) {
 	}
 }
 
-func TestChangesRejectsOversizedBatchAndUnsafeNativePath(t *testing.T) {
+func TestChangesRejectsOversizedBatchAndOmitsUnsafeNativePath(t *testing.T) {
 	s, f, _ := fixture(t)
 	turns := make([]string, 11)
 	for i := range turns {
@@ -82,9 +82,10 @@ func TestChangesRejectsOversizedBatchAndUnsafeNativePath(t *testing.T) {
 	if _, err := s.Changes(context.Background(), ChangesRequest{ThreadID: "thread-a", TurnIDs: turns}); CodeOf(err) != CodeInvalidArgument {
 		t.Fatalf("batch: %v", err)
 	}
-	f.items[0].Changes[0].Path = "../secret"
-	if _, err := s.Changes(context.Background(), ChangesRequest{ThreadID: "thread-a", TurnIDs: []string{"turn-a"}}); CodeOf(err) != CodePathNotAllowed {
-		t.Fatalf("path: %v", err)
+	f.items[0].Changes = append(f.items[0].Changes, Change{Path: "../secret", Kind: "update"})
+	got, err := s.Changes(context.Background(), ChangesRequest{ThreadID: "thread-a", TurnIDs: []string{"turn-a"}})
+	if err != nil || len(got.Turns) != 1 || len(got.Turns[0].FileChanges) != 1 {
+		t.Fatalf("invalid discovery path should be omitted without failing the batch: %+v %v", got, err)
 	}
 }
 
@@ -96,8 +97,9 @@ func TestChangesNormalizesNativeAbsolutePathOnlyInsideWorkspace(t *testing.T) {
 		t.Fatalf("inside: %+v %v", got, err)
 	}
 	f.items[0].Changes[0].Path = filepath.Join(filepath.Dir(f.thread.CWD), "outside.go")
-	if _, err := s.Changes(context.Background(), ChangesRequest{ThreadID: "thread-a", TurnIDs: []string{"turn-a"}}); CodeOf(err) != CodePathNotAllowed {
-		t.Fatalf("outside: %v", err)
+	got, err = s.Changes(context.Background(), ChangesRequest{ThreadID: "thread-a", TurnIDs: []string{"turn-a"}})
+	if err != nil || len(got.Turns) != 1 || len(got.Turns[0].FileChanges) != 0 {
+		t.Fatalf("outside discovery path should be omitted: %+v %v", got, err)
 	}
 }
 

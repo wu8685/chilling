@@ -120,7 +120,7 @@ func (s *Service) Changes(ctx context.Context, req ChangesRequest) (ChangesRespo
 			for _, change := range item.Changes {
 				path, ok := normalizeNativePath(thread.CWD, change.Path)
 				if !ok {
-					return ChangesResponse{}, fail(CodePathNotAllowed)
+					continue
 				}
 				kind := strings.ToLower(change.Kind)
 				if kind != "add" && kind != "update" && kind != "delete" {

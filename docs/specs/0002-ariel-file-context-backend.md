@@ -69,10 +69,10 @@ major version 不一致必须 fail closed；minor 新字段向后兼容。ready 
 ## 5. Changes 读取
 
 1. 使用公开 App Server 分页读取指定 thread／turn items，只接受 native `fileChange`。
-2. 返回项目相对路径、规范化 kind、有界 diff 和 `diffTruncated`；native path 若为绝对路径，必须先以 thread 权威 `cwd` 证明其位于 workspace 内并转换为相对路径，workspace 外路径 fail closed；响应不返回 workspace 绝对路径。
+2. 返回项目相对路径、规范化 kind、有界 diff 和 `diffTruncated`；native path 若为绝对路径，必须先以 thread 权威 `cwd` 证明其位于 workspace 内并转换为相对路径。workspace 外或无法规范化的 change 按项 fail closed 并从摘要中省略，不得让可选摘要阻断会话打开；`read` 对同类路径仍返回 `PATH_NOT_ALLOWED`。响应不返回 workspace 绝对路径。
 3. 同一 turn 同一路径多次出现时按首次出现顺序去重，最终 kind／diff 取最后一次完成状态。
 4. `turnIds[]` 最多 10 个；单次只读取调用方明确请求的 turn，不扫描全部历史。
-5. item shape 缺字段、路径不能归一化或 native 状态不确定时，对该项 fail closed 并返回有界诊断，不从 activity 文本猜路径。
+5. item shape 缺字段、路径不能归一化或 native 状态不确定时，对该项 fail closed；摘要响应省略该项，不从 activity 文本猜路径，也不把某一项的路径错误升级为整批失败。
 
 ## 6. 文件读取与路径安全
 
