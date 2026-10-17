@@ -1,0 +1,13 @@
+# Go build and test artifacts
+/chilling
+*.test
+*.out
+
+# Local runtime state
+/.local/
+*.sock
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/
