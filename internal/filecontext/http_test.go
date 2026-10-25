@@ -19,7 +19,7 @@ func TestHTTPContractIsAllowlistedAndBounded(t *testing.T) {
 		t.Fatalf("handshake status: %d", res.Code)
 	}
 	var capability Capability
-	if json.Unmarshal(res.Body.Bytes(), &capability) != nil || !capability.Ready || capability.Contract != Contract || capability.Limits.MaxFileBytes != MaxFileBytes {
+	if json.Unmarshal(res.Body.Bytes(), &capability) != nil || !capability.Ready || !capability.MessageReferences || capability.Contract != Contract || capability.Limits.MaxFileBytes != MaxFileBytes {
 		t.Fatalf("capability: %s", res.Body.String())
 	}
 
@@ -29,6 +29,15 @@ func TestHTTPContractIsAllowlistedAndBounded(t *testing.T) {
 	h.ServeHTTP(res, req)
 	if res.Code != http.StatusOK || !stringsContain(res.Body.String(), "internal/hello.go") {
 		t.Fatalf("changes: %d %s", res.Code, res.Body.String())
+	}
+
+	refBody := []byte(`{"threadId":"thread-a","turnId":"turn-a","itemId":"reply","referenceKind":"plain_path","rawReference":"internal/hello.go"}`)
+	source := s.source.(*fakeSource)
+	source.items = []Item{{ID: "reply", Type: "agentMessage", Text: "文件：internal/hello.go"}}
+	res = httptest.NewRecorder()
+	h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/file-context/reference/read", bytes.NewReader(refBody)))
+	if res.Code != http.StatusOK || !stringsContain(res.Body.String(), "internal/hello.go") {
+		t.Fatalf("reference read: %d %s", res.Code, res.Body.String())
 	}
 
 	for _, path := range []string{"/v1/file-context/proxy", "/v1/file-context/turn/start"} {

@@ -60,6 +60,7 @@ func (s *Source) Items(ctx context.Context, threadID, turnID string) ([]filecont
 			var item struct {
 				ID      string `json:"id"`
 				Type    string `json:"type"`
+				Text    string `json:"text"`
 				Changes []struct {
 					Path string `json:"path"`
 					Kind struct {
@@ -71,7 +72,7 @@ func (s *Source) Items(ctx context.Context, threadID, turnID string) ([]filecont
 			if json.Unmarshal(entry.Item, &item) != nil || item.ID == "" || item.Type == "" {
 				continue
 			}
-			mapped := filecontext.Item{ID: item.ID, Type: item.Type, Changes: make([]filecontext.Change, 0, len(item.Changes))}
+			mapped := filecontext.Item{ID: item.ID, Type: item.Type, Text: item.Text, Changes: make([]filecontext.Change, 0, len(item.Changes))}
 			for _, change := range item.Changes {
 				mapped.Changes = append(mapped.Changes, filecontext.Change{Path: change.Path, Kind: change.Kind.Type, Diff: change.Diff})
 			}

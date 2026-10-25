@@ -35,6 +35,7 @@ const (
 	CodeUnsupportedFileType Code = "UNSUPPORTED_FILE_TYPE"
 	CodeFileTooLarge        Code = "FILE_TOO_LARGE"
 	CodeFileChanged         Code = "FILE_CHANGED"
+	CodeReferenceNotFound   Code = "REFERENCE_NOT_FOUND"
 	CodeInternal            Code = "INTERNAL"
 )
 
@@ -57,6 +58,7 @@ type Thread struct{ ID, CWD string }
 type Change struct{ Path, Kind, Diff string }
 type Item struct {
 	ID, Type string
+	Text     string
 	Changes  []Change
 }
 type Metadata struct {
@@ -206,7 +208,11 @@ func (s *Service) Read(ctx context.Context, req ReadRequest) (ReadResponse, erro
 	if declared == nil {
 		return ReadResponse{}, fail(CodePathNotAllowed)
 	}
-	abs, err := resolveNoSymlink(thread.CWD, rel)
+	return s.readCurrentFile(ctx, thread.CWD, rel, declared)
+}
+
+func (s *Service) readCurrentFile(ctx context.Context, root, rel string, declared *Change) (ReadResponse, error) {
+	abs, err := resolveNoSymlink(root, rel)
 	if err != nil {
 		return ReadResponse{}, err
 	}
@@ -228,20 +234,25 @@ func (s *Service) Read(ctx context.Context, req ReadRequest) (ReadResponse, erro
 		return ReadResponse{}, fail(CodeUnsupportedFileType)
 	}
 	digest := sha256.Sum256(body)
-	diff, truncated := truncate(declared.Diff, MaxDiffBytes)
+	diff, truncated := "", false
+	if declared != nil {
+		diff, truncated = truncate(declared.Diff, MaxDiffBytes)
+	}
 	return ReadResponse{Path: rel, Content: string(body), SHA256: hex.EncodeToString(digest[:]), ModifiedAtMS: meta.ModifiedAtMS, LineCount: bytes.Count(body, []byte{'\n'}) + 1, Language: languageFor(rel), Diff: diff, DiffTruncated: truncated, Version: "current-workspace"}, nil
 }
 
 type Selection struct {
-	ThreadID     string `json:"threadId"`
-	TurnID       string `json:"turnId"`
-	ItemID       string `json:"itemId"`
-	Path         string `json:"path"`
-	SHA256       string `json:"sha256"`
-	ModifiedAtMS int64  `json:"modifiedAtMs"`
-	StartLine    int    `json:"startLine"`
-	EndLine      int    `json:"endLine"`
-	Text         string `json:"text"`
+	ThreadID      string        `json:"threadId"`
+	TurnID        string        `json:"turnId"`
+	ItemID        string        `json:"itemId"`
+	Path          string        `json:"path"`
+	SHA256        string        `json:"sha256"`
+	ModifiedAtMS  int64         `json:"modifiedAtMs"`
+	StartLine     int           `json:"startLine"`
+	EndLine       int           `json:"endLine"`
+	Text          string        `json:"text"`
+	ReferenceKind ReferenceKind `json:"referenceKind,omitempty"`
+	RawReference  string        `json:"rawReference,omitempty"`
 }
 type PrepareRequest struct {
 	Selections []Selection `json:"selections"`
@@ -273,7 +284,16 @@ func (s *Service) Prepare(ctx context.Context, req PrepareRequest) (PrepareRespo
 		if total > MaxTotalBytes {
 			return PrepareResponse{}, fail(CodeInvalidArgument)
 		}
-		read, err := s.Read(ctx, ReadRequest{ThreadID: selection.ThreadID, TurnID: selection.TurnID, ItemID: selection.ItemID, Path: selection.Path})
+		var read ReadResponse
+		var err error
+		if selection.ReferenceKind != "" || selection.RawReference != "" {
+			if selection.ReferenceKind == "" || selection.RawReference == "" {
+				return PrepareResponse{}, fail(CodeInvalidArgument)
+			}
+			read, err = s.ReferenceRead(ctx, ReferenceReadRequest{ThreadID: selection.ThreadID, TurnID: selection.TurnID, ItemID: selection.ItemID, ReferenceKind: selection.ReferenceKind, RawReference: selection.RawReference})
+		} else {
+			read, err = s.Read(ctx, ReadRequest{ThreadID: selection.ThreadID, TurnID: selection.TurnID, ItemID: selection.ItemID, Path: selection.Path})
+		}
 		if err != nil {
 			return PrepareResponse{}, err
 		}

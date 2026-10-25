@@ -22,7 +22,7 @@ func (f *fakeCaller) Call(_ context.Context, method string, params any, result a
 	case "thread/read":
 		body = `{"thread":{"id":"thread-a","cwd":"/workspace"}}`
 	case "thread/items/list":
-		body = `{"data":[{"turnId":"turn-a","item":{"type":"fileChange","id":"item-a","changes":[{"path":"a.go","kind":{"type":"update","move_path":null},"diff":"@@"}],"status":"completed"},"startedAtMs":1,"completedAtMs":2}],"nextCursor":null}`
+		body = `{"data":[{"turnId":"turn-a","item":{"type":"fileChange","id":"item-a","changes":[{"path":"a.go","kind":{"type":"update","move_path":null},"diff":"@@"}],"status":"completed"},"startedAtMs":1,"completedAtMs":2},{"turnId":"turn-a","item":{"type":"agentMessage","id":"reply","text":"文件：a.go"}}],"nextCursor":null}`
 	case "fs/getMetadata":
 		body = `{"isDirectory":false,"isFile":true,"isSymlink":false,"createdAtMs":1,"modifiedAtMs":2}`
 	case "fs/readFile":
@@ -41,7 +41,7 @@ func TestSourceMapsOnlyPublicReadMethods(t *testing.T) {
 		t.Fatalf("thread: %+v %v", thread, err)
 	}
 	items, err := s.Items(context.Background(), "thread-a", "turn-a")
-	if err != nil || len(items) != 1 || items[0].Changes[0].Kind != "update" {
+	if err != nil || len(items) != 2 || items[0].Changes[0].Kind != "update" || items[1].Text != "文件：a.go" {
 		t.Fatalf("items: %+v %v", items, err)
 	}
 	meta, err := s.Metadata(context.Background(), "/workspace/a.go")

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -123,6 +124,78 @@ func TestReadAcceptsNativeAbsolutePathOnlyAfterWorkspaceNormalization(t *testing
 	got, err := s.Read(context.Background(), ReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "item-a", Path: "internal/hello.go"})
 	if err != nil || got.Path != "internal/hello.go" {
 		t.Fatalf("read: %+v %v", got, err)
+	}
+}
+
+func TestReferenceReadRequiresExactMarkdownOrPlainReference(t *testing.T) {
+	s, f, path := fixture(t)
+	f.items = []Item{{ID: "reply", Type: "agentMessage", Text: "详情见 [设计](internal/hello.go:3)。交付文件：internal/hello.go"}}
+
+	markdown, err := s.ReferenceRead(context.Background(), ReferenceReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindMarkdownLink, RawReference: "internal/hello.go:3"})
+	if err != nil || markdown.Path != "internal/hello.go" || !strings.Contains(markdown.Content, "hello <world>") {
+		t.Fatalf("markdown: %+v %v", markdown, err)
+	}
+	plain, err := s.ReferenceRead(context.Background(), ReferenceReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindPlainPath, RawReference: "internal/hello.go"})
+	if err != nil || plain.Path != "internal/hello.go" {
+		t.Fatalf("plain: %+v %v", plain, err)
+	}
+	if _, err := s.ReferenceRead(context.Background(), ReferenceReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindPlainPath, RawReference: "missing.go"}); CodeOf(err) != CodeReferenceNotFound {
+		t.Fatalf("undeclared: %v", err)
+	}
+	f.items[0].Text = "绝对路径：" + path + "\n[带空格的标题](<" + path + "#L3-L4>)"
+	for _, request := range []ReferenceReadRequest{
+		{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindPlainPath, RawReference: path},
+		{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindMarkdownLink, RawReference: path + "#L3-L4"},
+	} {
+		if got, err := s.ReferenceRead(context.Background(), request); err != nil || got.Path != "internal/hello.go" {
+			t.Fatalf("absolute reference %s %q: %+v %v", request.ReferenceKind, request.RawReference, got, err)
+		}
+	}
+}
+
+func TestReferenceReadLimitsOneMessageToFirstTwentyFourReferences(t *testing.T) {
+	s, f, _ := fixture(t)
+	parts := make([]string, 0, 25)
+	for i := 1; i <= 24; i++ {
+		parts = append(parts, "file-"+strconv.Itoa(i)+".md")
+	}
+	parts = append(parts, "internal/hello.go")
+	f.items = []Item{{ID: "reply", Type: "agentMessage", Text: strings.Join(parts, " ")}}
+	if _, err := s.ReferenceRead(context.Background(), ReferenceReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindPlainPath, RawReference: "internal/hello.go"}); CodeOf(err) != CodeReferenceNotFound {
+		t.Fatalf("25th reference must remain unauthorized: %v", err)
+	}
+}
+
+func TestReferenceReadRejectsCodeURLWrongItemAndWorkspaceEscape(t *testing.T) {
+	s, f, _ := fixture(t)
+	f.items = []Item{
+		{ID: "reply", Type: "agentMessage", Text: "`internal/hello.go`\n\n```text\ninternal/hello.go\n[伪链接](internal/hello.go)\n```\nhttps://example.test/internal/hello.go\n<span>internal/hello.go</span>"},
+		{ID: "tool", Type: "fileChange", Text: "internal/hello.go"},
+	}
+	for _, itemID := range []string{"reply", "tool"} {
+		if _, err := s.ReferenceRead(context.Background(), ReferenceReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: itemID, ReferenceKind: ReferenceKindPlainPath, RawReference: "internal/hello.go"}); CodeOf(err) != CodeReferenceNotFound && CodeOf(err) != CodeItemNotFound {
+			t.Fatalf("item %s: %v", itemID, err)
+		}
+	}
+	if _, err := s.ReferenceRead(context.Background(), ReferenceReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindMarkdownLink, RawReference: "internal/hello.go"}); CodeOf(err) != CodeReferenceNotFound {
+		t.Fatalf("markdown code block: %v", err)
+	}
+	f.items = []Item{{ID: "reply", Type: "agentMessage", Text: "[outside](../outside.txt)"}}
+	if _, err := s.ReferenceRead(context.Background(), ReferenceReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindMarkdownLink, RawReference: "../outside.txt"}); CodeOf(err) != CodePathNotAllowed {
+		t.Fatalf("escape: %v", err)
+	}
+}
+
+func TestPrepareRevalidatesReferenceSelection(t *testing.T) {
+	s, f, _ := fixture(t)
+	f.items = []Item{{ID: "reply", Type: "agentMessage", Text: "文件：internal/hello.go"}}
+	read, err := s.ReferenceRead(context.Background(), ReferenceReadRequest{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", ReferenceKind: ReferenceKindPlainPath, RawReference: "internal/hello.go"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Prepare(context.Background(), PrepareRequest{Selections: []Selection{{ThreadID: "thread-a", TurnID: "turn-a", ItemID: "reply", Path: read.Path, SHA256: read.SHA256, ModifiedAtMS: read.ModifiedAtMS, StartLine: 4, EndLine: 4, Text: "return \"hello <world> & friends\"", ReferenceKind: ReferenceKindPlainPath, RawReference: "internal/hello.go"}}})
+	if err != nil || len(got.Quotes) != 1 {
+		t.Fatalf("prepare: %+v %v", got, err)
 	}
 }
 

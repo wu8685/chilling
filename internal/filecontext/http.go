@@ -18,24 +18,28 @@ type Limits struct {
 }
 
 type Capability struct {
-	Contract     string `json:"contract"`
-	Enabled      bool   `json:"enabled"`
-	Ready        bool   `json:"ready"`
-	BuildVersion string `json:"buildVersion"`
-	CodexAdapter string `json:"codexAdapter"`
-	Limits       Limits `json:"limits"`
+	Contract          string `json:"contract"`
+	Enabled           bool   `json:"enabled"`
+	Ready             bool   `json:"ready"`
+	BuildVersion      string `json:"buildVersion"`
+	CodexAdapter      string `json:"codexAdapter"`
+	MessageReferences bool   `json:"messageReferences"`
+	Limits            Limits `json:"limits"`
 }
 
 func NewHTTPHandler(service *Service, buildVersion, codexAdapter string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/file-context/capabilities", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, Capability{Contract: Contract, Enabled: true, Ready: service != nil && service.source != nil, BuildVersion: buildVersion, CodexAdapter: codexAdapter, Limits: Limits{MaxTurnBatch: MaxTurnBatch, MaxFileBytes: MaxFileBytes, MaxSelections: MaxSelections, MaxSelectionBytes: MaxSelectionBytes, MaxTotalBytes: MaxTotalBytes}})
+		writeJSON(w, http.StatusOK, Capability{Contract: Contract, Enabled: true, Ready: service != nil && service.source != nil, BuildVersion: buildVersion, CodexAdapter: codexAdapter, MessageReferences: true, Limits: Limits{MaxTurnBatch: MaxTurnBatch, MaxFileBytes: MaxFileBytes, MaxSelections: MaxSelections, MaxSelectionBytes: MaxSelectionBytes, MaxTotalBytes: MaxTotalBytes}})
 	})
 	mux.HandleFunc("POST /v1/file-context/changes", endpoint(service, func() any { return &ChangesRequest{} }, func(r *http.Request, input any) (any, error) {
 		return service.Changes(r.Context(), *(input.(*ChangesRequest)))
 	}))
 	mux.HandleFunc("POST /v1/file-context/read", endpoint(service, func() any { return &ReadRequest{} }, func(r *http.Request, input any) (any, error) {
 		return service.Read(r.Context(), *(input.(*ReadRequest)))
+	}))
+	mux.HandleFunc("POST /v1/file-context/reference/read", endpoint(service, func() any { return &ReferenceReadRequest{} }, func(r *http.Request, input any) (any, error) {
+		return service.ReferenceRead(r.Context(), *(input.(*ReferenceReadRequest)))
 	}))
 	mux.HandleFunc("POST /v1/file-context/prepare", endpoint(service, func() any { return &PrepareRequest{} }, func(r *http.Request, input any) (any, error) {
 		return service.Prepare(r.Context(), *(input.(*PrepareRequest)))
