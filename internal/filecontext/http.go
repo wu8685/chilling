@@ -24,14 +24,23 @@ type Capability struct {
 	BuildVersion      string `json:"buildVersion"`
 	CodexAdapter      string `json:"codexAdapter"`
 	MessageReferences bool   `json:"messageReferences"`
+	WorkspaceBrowser  bool   `json:"workspaceBrowser"`
 	Limits            Limits `json:"limits"`
 }
 
 func NewHTTPHandler(service *Service, buildVersion, codexAdapter string) http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /v1/file-context/capabilities", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, Capability{Contract: Contract, Enabled: true, Ready: service != nil && service.source != nil, BuildVersion: buildVersion, CodexAdapter: codexAdapter, MessageReferences: true, Limits: Limits{MaxTurnBatch: MaxTurnBatch, MaxFileBytes: MaxFileBytes, MaxSelections: MaxSelections, MaxSelectionBytes: MaxSelectionBytes, MaxTotalBytes: MaxTotalBytes}})
+		writeJSON(w, http.StatusOK, Capability{Contract: Contract, Enabled: true, Ready: service != nil && service.source != nil, BuildVersion: buildVersion, CodexAdapter: codexAdapter, MessageReferences: true, WorkspaceBrowser: service != nil && service.workspaceBrowser, Limits: Limits{MaxTurnBatch: MaxTurnBatch, MaxFileBytes: MaxFileBytes, MaxSelections: MaxSelections, MaxSelectionBytes: MaxSelectionBytes, MaxTotalBytes: MaxTotalBytes}})
 	})
+	if service != nil && service.workspaceBrowser {
+		mux.HandleFunc("POST /v1/file-context/workspace/files/list", endpoint(service, func() any { return &WorkspaceListRequest{} }, func(r *http.Request, input any) (any, error) {
+			return service.WorkspaceList(r.Context(), *(input.(*WorkspaceListRequest)))
+		}))
+		mux.HandleFunc("POST /v1/file-context/workspace/file/read", endpoint(service, func() any { return &WorkspaceReadRequest{} }, func(r *http.Request, input any) (any, error) {
+			return service.WorkspaceRead(r.Context(), *(input.(*WorkspaceReadRequest)))
+		}))
+	}
 	mux.HandleFunc("POST /v1/file-context/changes", endpoint(service, func() any { return &ChangesRequest{} }, func(r *http.Request, input any) (any, error) {
 		return service.Changes(r.Context(), *(input.(*ChangesRequest)))
 	}))

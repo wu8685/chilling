@@ -5,23 +5,27 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
 
 const (
-	Contract          = "file-context/v1"
-	MaxTurnBatch      = 10
-	MaxFileBytes      = 1 << 20
-	MaxSelections     = 5
-	MaxSelectionBytes = 8 << 10
-	MaxTotalBytes     = 24 << 10
-	MaxDiffBytes      = 64 << 10
+	Contract                  = "file-context/v1"
+	MaxTurnBatch              = 10
+	MaxFileBytes              = 1 << 20
+	MaxSelections             = 5
+	MaxSelectionBytes         = 8 << 10
+	MaxTotalBytes             = 24 << 10
+	MaxDiffBytes              = 64 << 10
+	MaxWorkspaceResponseBytes = 256 << 10
 )
 
 type Code string
@@ -36,6 +40,8 @@ const (
 	CodeFileTooLarge        Code = "FILE_TOO_LARGE"
 	CodeFileChanged         Code = "FILE_CHANGED"
 	CodeReferenceNotFound   Code = "REFERENCE_NOT_FOUND"
+	CodeFeatureDisabled     Code = "FEATURE_DISABLED"
+	CodeDirectoryChanged    Code = "DIRECTORY_CHANGED"
 	CodeInternal            Code = "INTERNAL"
 )
 
@@ -73,9 +79,207 @@ type Source interface {
 	ReadFile(context.Context, string) ([]byte, error)
 }
 
-type Service struct{ source Source }
+type Service struct {
+	source           Source
+	workspaceBrowser bool
+}
 
 func New(source Source) *Service { return &Service{source: source} }
+func NewWithWorkspaceBrowser(source Source, enabled bool) *Service {
+	return &Service{source: source, workspaceBrowser: enabled}
+}
+
+type WorkspaceEntryKind string
+
+const (
+	WorkspaceEntryFile        WorkspaceEntryKind = "file"
+	WorkspaceEntryDirectory   WorkspaceEntryKind = "directory"
+	WorkspaceEntrySymlink     WorkspaceEntryKind = "symlink"
+	DefaultWorkspaceListLimit                    = 100
+	MaxWorkspaceListLimit                        = 200
+)
+
+type WorkspaceListRequest struct {
+	ThreadID string `json:"threadId"`
+	Path     string `json:"path"`
+	Cursor   string `json:"cursor,omitempty"`
+	Limit    int    `json:"limit,omitempty"`
+}
+type WorkspaceEntry struct {
+	Name         string             `json:"name"`
+	Path         string             `json:"path"`
+	Kind         WorkspaceEntryKind `json:"kind"`
+	SizeBytes    int64              `json:"sizeBytes"`
+	ModifiedAtMS int64              `json:"modifiedAtMs"`
+	Readable     bool               `json:"readable"`
+}
+type WorkspaceListResponse struct {
+	Path       string           `json:"path"`
+	Entries    []WorkspaceEntry `json:"entries"`
+	NextCursor string           `json:"nextCursor,omitempty"`
+	Revision   string           `json:"revision"`
+}
+type workspaceCursor struct {
+	Path, Revision string
+	Offset         int
+}
+
+func (s *Service) WorkspaceList(ctx context.Context, req WorkspaceListRequest) (WorkspaceListResponse, error) {
+	if s == nil || s.source == nil || !s.workspaceBrowser {
+		return WorkspaceListResponse{}, fail(CodeFeatureDisabled)
+	}
+	if req.ThreadID == "" || req.Limit < 0 || req.Limit > MaxWorkspaceListLimit {
+		return WorkspaceListResponse{}, fail(CodeInvalidArgument)
+	}
+	if req.Limit == 0 {
+		req.Limit = DefaultWorkspaceListLimit
+	}
+	rel, ok := safeWorkspaceDirectory(req.Path)
+	if !ok {
+		return WorkspaceListResponse{}, fail(CodePathNotAllowed)
+	}
+	thread, err := s.source.Thread(ctx, req.ThreadID)
+	if err != nil || thread.ID != req.ThreadID || thread.CWD == "" {
+		return WorkspaceListResponse{}, fail(CodeThreadNotFound)
+	}
+	abs, err := resolveWorkspacePath(thread.CWD, rel)
+	if err != nil {
+		return WorkspaceListResponse{}, err
+	}
+	children, err := os.ReadDir(abs)
+	if err != nil {
+		return WorkspaceListResponse{}, fail(CodeFileNotFound)
+	}
+	entries := make([]WorkspaceEntry, 0, len(children))
+	for _, child := range children {
+		info, statErr := child.Info()
+		if statErr != nil {
+			continue
+		}
+		kind := WorkspaceEntryFile
+		readable := info.Mode().IsRegular()
+		if child.Type()&os.ModeSymlink != 0 {
+			kind, readable = WorkspaceEntrySymlink, false
+		} else if child.IsDir() {
+			kind, readable = WorkspaceEntryDirectory, true
+		}
+		if !info.Mode().IsRegular() && !child.IsDir() && kind != WorkspaceEntrySymlink {
+			continue
+		}
+		childPath := child.Name()
+		if rel != "" {
+			childPath = rel + "/" + child.Name()
+		}
+		if childPath == ".git" {
+			readable = false
+		}
+		entries = append(entries, WorkspaceEntry{Name: child.Name(), Path: childPath, Kind: kind, SizeBytes: info.Size(), ModifiedAtMS: info.ModTime().UnixMilli(), Readable: readable})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if (entries[i].Kind == WorkspaceEntryDirectory) != (entries[j].Kind == WorkspaceEntryDirectory) {
+			return entries[i].Kind == WorkspaceEntryDirectory
+		}
+		return entries[i].Name < entries[j].Name
+	})
+	revision := workspaceRevision(entries)
+	offset := 0
+	if req.Cursor != "" {
+		cursor, decodeErr := decodeWorkspaceCursor(req.Cursor)
+		if decodeErr != nil || cursor.Path != rel || cursor.Offset < 0 || cursor.Offset > len(entries) {
+			return WorkspaceListResponse{}, fail(CodeInvalidArgument)
+		}
+		if cursor.Revision != revision {
+			return WorkspaceListResponse{}, fail(CodeDirectoryChanged)
+		}
+		offset = cursor.Offset
+	}
+	return boundedWorkspacePage(rel, entries, offset, req.Limit, revision)
+}
+
+func boundedWorkspacePage(path string, entries []WorkspaceEntry, offset, limit int, revision string) (WorkspaceListResponse, error) {
+	end := offset + limit
+	if end > len(entries) {
+		end = len(entries)
+	}
+	for end > offset {
+		out := WorkspaceListResponse{Path: path, Entries: entries[offset:end], Revision: revision}
+		if end < len(entries) {
+			out.NextCursor = encodeWorkspaceCursor(workspaceCursor{Path: path, Revision: revision, Offset: end})
+		}
+		body, err := json.Marshal(out)
+		if err != nil {
+			return WorkspaceListResponse{}, fail(CodeInternal)
+		}
+		if len(body) <= MaxWorkspaceResponseBytes {
+			return out, nil
+		}
+		end--
+	}
+	return WorkspaceListResponse{}, fail(CodeFileTooLarge)
+}
+
+func workspaceRevision(entries []WorkspaceEntry) string {
+	h := sha256.New()
+	for _, entry := range entries {
+		_, _ = h.Write([]byte(entry.Name + "\x00" + string(entry.Kind) + "\x00" + strconv.FormatInt(entry.SizeBytes, 10) + "\x00" + strconv.FormatInt(entry.ModifiedAtMS, 10) + "\n"))
+	}
+	return hex.EncodeToString(h.Sum(nil))
+}
+func encodeWorkspaceCursor(cursor workspaceCursor) string {
+	body, _ := json.Marshal(cursor)
+	return base64.RawURLEncoding.EncodeToString(body)
+}
+func decodeWorkspaceCursor(value string) (workspaceCursor, error) {
+	var out workspaceCursor
+	body, err := base64.RawURLEncoding.DecodeString(value)
+	if err == nil {
+		err = json.Unmarshal(body, &out)
+	}
+	return out, err
+}
+func safeWorkspaceDirectory(input string) (string, bool) {
+	if input == "" {
+		return "", true
+	}
+	rel, ok := safeRelativePath(input)
+	if !ok || rel == ".git" || strings.HasPrefix(rel, ".git/") {
+		return "", false
+	}
+	return rel, true
+}
+func resolveWorkspacePath(root, rel string) (string, error) {
+	if rel == "" {
+		abs, err := filepath.Abs(root)
+		if err != nil {
+			return "", fail(CodePathNotAllowed)
+		}
+		return abs, nil
+	}
+	return resolveNoSymlink(root, rel)
+}
+
+type WorkspaceReadRequest struct {
+	ThreadID string `json:"threadId"`
+	Path     string `json:"path"`
+}
+
+func (s *Service) WorkspaceRead(ctx context.Context, req WorkspaceReadRequest) (ReadResponse, error) {
+	if s == nil || s.source == nil || !s.workspaceBrowser {
+		return ReadResponse{}, fail(CodeFeatureDisabled)
+	}
+	if req.ThreadID == "" {
+		return ReadResponse{}, fail(CodeInvalidArgument)
+	}
+	rel, ok := safeRelativePath(req.Path)
+	if !ok || rel == ".git" || strings.HasPrefix(rel, ".git/") {
+		return ReadResponse{}, fail(CodePathNotAllowed)
+	}
+	thread, err := s.source.Thread(ctx, req.ThreadID)
+	if err != nil || thread.ID != req.ThreadID || thread.CWD == "" {
+		return ReadResponse{}, fail(CodeThreadNotFound)
+	}
+	return s.readCurrentFile(ctx, thread.CWD, rel, nil)
+}
 
 type ChangesRequest struct {
 	ThreadID string   `json:"threadId"`
@@ -242,18 +446,27 @@ func (s *Service) readCurrentFile(ctx context.Context, root, rel string, declare
 }
 
 type Selection struct {
-	ThreadID      string        `json:"threadId"`
-	TurnID        string        `json:"turnId"`
-	ItemID        string        `json:"itemId"`
-	Path          string        `json:"path"`
-	SHA256        string        `json:"sha256"`
-	ModifiedAtMS  int64         `json:"modifiedAtMs"`
-	StartLine     int           `json:"startLine"`
-	EndLine       int           `json:"endLine"`
-	Text          string        `json:"text"`
-	ReferenceKind ReferenceKind `json:"referenceKind,omitempty"`
-	RawReference  string        `json:"rawReference,omitempty"`
+	Source        SelectionSource `json:"source,omitempty"`
+	ThreadID      string          `json:"threadId"`
+	TurnID        string          `json:"turnId"`
+	ItemID        string          `json:"itemId"`
+	Path          string          `json:"path"`
+	SHA256        string          `json:"sha256"`
+	ModifiedAtMS  int64           `json:"modifiedAtMs"`
+	StartLine     int             `json:"startLine"`
+	EndLine       int             `json:"endLine"`
+	Text          string          `json:"text"`
+	ReferenceKind ReferenceKind   `json:"referenceKind,omitempty"`
+	RawReference  string          `json:"rawReference,omitempty"`
 }
+type SelectionSource string
+
+const (
+	SelectionSourceTurnChange       SelectionSource = "turn_change"
+	SelectionSourceMessageReference SelectionSource = "message_reference"
+	SelectionSourceWorkspaceBrowser SelectionSource = "workspace_browser"
+)
+
 type PrepareRequest struct {
 	Selections []Selection `json:"selections"`
 }
@@ -286,7 +499,12 @@ func (s *Service) Prepare(ctx context.Context, req PrepareRequest) (PrepareRespo
 		}
 		var read ReadResponse
 		var err error
-		if selection.ReferenceKind != "" || selection.RawReference != "" {
+		if selection.Source == SelectionSourceWorkspaceBrowser {
+			if selection.TurnID != "" || selection.ItemID != "" || selection.ReferenceKind != "" || selection.RawReference != "" {
+				return PrepareResponse{}, fail(CodeInvalidArgument)
+			}
+			read, err = s.WorkspaceRead(ctx, WorkspaceReadRequest{ThreadID: selection.ThreadID, Path: selection.Path})
+		} else if selection.ReferenceKind != "" || selection.RawReference != "" {
 			if selection.ReferenceKind == "" || selection.RawReference == "" {
 				return PrepareResponse{}, fail(CodeInvalidArgument)
 			}

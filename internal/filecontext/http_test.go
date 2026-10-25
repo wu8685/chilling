@@ -49,6 +49,27 @@ func TestHTTPContractIsAllowlistedAndBounded(t *testing.T) {
 	}
 }
 
+func TestHTTPWorkspaceBrowserRoutesRequireExplicitCapability(t *testing.T) {
+	_, source, _ := fixture(t)
+	for _, test := range []struct {
+		enabled bool
+		want    int
+	}{{false, http.StatusNotFound}, {true, http.StatusOK}} {
+		h := NewHTTPHandler(NewWithWorkspaceBrowser(source, test.enabled), "test", "test")
+		res := httptest.NewRecorder()
+		h.ServeHTTP(res, httptest.NewRequest(http.MethodPost, "/v1/file-context/workspace/files/list", bytes.NewReader([]byte(`{"threadId":"thread-a","path":""}`))))
+		if res.Code != test.want {
+			t.Fatalf("enabled=%v code=%d body=%s", test.enabled, res.Code, res.Body.String())
+		}
+		res = httptest.NewRecorder()
+		h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/v1/file-context/capabilities", nil))
+		var capability Capability
+		if err := json.Unmarshal(res.Body.Bytes(), &capability); err != nil || capability.WorkspaceBrowser != test.enabled {
+			t.Fatalf("enabled=%v capability=%+v err=%v", test.enabled, capability, err)
+		}
+	}
+}
+
 func TestHTTPRejectsUnknownFieldsAndOversizedBody(t *testing.T) {
 	s, _, _ := fixture(t)
 	h := NewHTTPHandler(s, "test", "test")

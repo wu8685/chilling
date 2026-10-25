@@ -19,6 +19,7 @@ var buildVersion = "dev"
 
 type config struct {
 	enabled             bool
+	workspaceBrowser    bool
 	socket, binary, cwd string
 }
 
@@ -30,6 +31,7 @@ func parse(args []string) (config, error) {
 	set.SetOutput(os.Stderr)
 	var cfg config
 	set.BoolVar(&cfg.enabled, "enable-ariel-file-context", false, "enable the local Ariel file-context contract")
+	set.BoolVar(&cfg.workspaceBrowser, "enable-ariel-workspace-browser", false, "enable the read-only Ariel workspace browser")
 	set.StringVar(&cfg.socket, "socket", "", "absolute Unix socket path")
 	set.StringVar(&cfg.binary, "codex-binary", "", "Codex binary providing app-server")
 	set.StringVar(&cfg.cwd, "cwd", "", "initial App Server working directory")
@@ -56,7 +58,7 @@ func run(ctx context.Context, cfg config) error {
 	}
 	defer process.Close()
 	source := codexapp.NewSource(process)
-	service := filecontext.New(source)
+	service := filecontext.NewWithWorkspaceBrowser(source, cfg.workspaceBrowser)
 	handler := filecontext.NewHTTPHandler(service, buildVersion, "codex-app-server-public-v2")
 	return localserver.Serve(ctx, localserver.Config{Enabled: cfg.enabled, Socket: cfg.socket}, handler)
 }
